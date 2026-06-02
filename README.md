@@ -92,7 +92,7 @@ work/source/
 
 翻訳対象一覧:
 
-- [localized-records.txt](/E:/SteamLibrary/steamapps/common/PQTC/github_release/metadata/localized-records.txt)
+- [localized-records.txt](metadata/localized-records.txt)
 
 ### 4. 翻訳済みファイルをゲームへ適用する
 
@@ -110,20 +110,20 @@ node .\scripts\apply_localization_targets.mjs --game-dir "C:\Program Files (x86)
 
 ### 抽出で使うスクリプト
 
-- [extract_localization_targets.mjs](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/extract_localization_targets.mjs)  
+- [extract_localization_targets.mjs](scripts/extract_localization_targets.mjs)  
   `localized-records.txt` を読んで、対象レコードをまとめて抽出します。
-- [export_ppp_record.mjs](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/export_ppp_record.mjs)  
+- [export_ppp_record.mjs](scripts/export_ppp_record.mjs)  
   1 レコードずつ `all.ppp` から展開します。
-- [pqtc_text_manifest.json](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/pqtc_text_manifest.json)  
+- [pqtc_text_manifest.json](scripts/pqtc_text_manifest.json)  
   レコード復号に必要なマニフェストです。
 
 ### 適用で使うスクリプト
 
-- [apply_localization_targets.mjs](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/apply_localization_targets.mjs)  
+- [apply_localization_targets.mjs](scripts/apply_localization_targets.mjs)  
   `work/source/` の翻訳済みファイルを順番に適用します。
-- [pqtc_record_patch.mjs](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/pqtc_record_patch.mjs)  
+- [pqtc_record_patch.mjs](scripts/pqtc_record_patch.mjs)  
   1 レコードずつ `all.ppp` にパッチを当てます。
-- [pqtc_text_manifest.json](/E:/SteamLibrary/steamapps/common/PQTC/github_release/scripts/pqtc_text_manifest.json)  
+- [pqtc_text_manifest.json](scripts/pqtc_text_manifest.json)  
   レコード再パックに必要なマニフェストです。
 
 ## 個別にレコードを扱う方法
@@ -172,6 +172,6 @@ all.ppp.bak -> all.ppp
 
 ## 関連ドキュメント
 
-- [WORKFLOW.md](/E:/SteamLibrary/steamapps/common/PQTC/github_release/docs/WORKFLOW.md)
-- [PUBLICATION_POLICY.md](/E:/SteamLibrary/steamapps/common/PQTC/github_release/docs/PUBLICATION_POLICY.md)
-- [REPO_LAYOUT.md](/E:/SteamLibrary/steamapps/common/PQTC/github_release/docs/REPO_LAYOUT.md)
+- [WORKFLOW.md](docs/WORKFLOW.md)
+- [PUBLICATION_POLICY.md](docs/PUBLICATION_POLICY.md)
+- [REPO_LAYOUT.md](docs/REPO_LAYOUT.md)
