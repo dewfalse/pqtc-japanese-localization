@@ -1,0 +1,18 @@
+# Local-only working files
+tmp/
+dist/
+out/
+work/source/*
+!work/source/.gitkeep
+
+# Never publish game assets here
+*.ppp
+*.bak
+*.dmp
+*.bin
+*.dll
+*.exe
+
+# Common local clutter
+Thumbs.db
+.DS_Store
