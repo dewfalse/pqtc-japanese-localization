@@ -1,0 +1,2 @@
+Image\battle\Result\Img_VICTORY_ZHS.png	Image\battle\Result\Img_VICTORY_ZHT.png
+Image\battle\Result\Img_DEFEAT_ZHS.png	Image\battle\Result\Img_DEFEAT_ZHT.png

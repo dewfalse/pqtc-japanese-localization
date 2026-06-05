@@ -12,6 +12,7 @@ repo-root/
   metadata/
     README.md
     localized-records.txt
+    record-copies.txt
   scripts/
     pqtc_text_manifest.json
     export_ppp_record.mjs

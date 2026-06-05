@@ -10,8 +10,10 @@ function usage() {
     "Usage:",
     '  node tools/pqtc_record_patch.mjs patch "<recordName>" "<localFile>" [--apply]',
     '  node tools/pqtc_record_patch.mjs check "<recordName>" "<localFile>"',
+    '  node tools/pqtc_record_patch.mjs copy "<targetRecordName>" "<sourceRecordName>" [--apply]',
     '  node tools/pqtc_record_patch.mjs patch --game-dir "<PQTC dir>" "<recordName>" "<localFile>" [--apply]',
     '  node tools/pqtc_record_patch.mjs check --game-dir "<PQTC dir>" "<recordName>" "<localFile>"',
+    '  node tools/pqtc_record_patch.mjs copy --game-dir "<PQTC dir>" "<targetRecordName>" "<sourceRecordName>" [--apply]',
   ].join("\n"));
 }
 
@@ -481,10 +483,7 @@ function getLiveRecord(manifest, name) {
   return rec;
 }
 
-function patchRecord(recordName, localFile, apply) {
-  const manifest = loadManifest();
-  const rec = getLiveRecord(manifest, recordName);
-  const editedPlain = fs.readFileSync(path.resolve(root, localFile));
+function writeRecordBytes(manifest, rec, editedPlain, apply) {
   const { plain: originalPlain, rawBody } = decodePlainWithMode(manifest, rec);
   console.log(`${rec.name}: original=${originalPlain.length} edited=${editedPlain.length} delta=${editedPlain.length - originalPlain.length}`);
   if (rawBody) console.log("Raw packed body mode detected.");
@@ -553,14 +552,34 @@ function patchRecord(recordName, localFile, apply) {
   }
 }
 
+function patchRecord(recordName, localFile, apply) {
+  const manifest = loadManifest();
+  const rec = getLiveRecord(manifest, recordName);
+  const editedPlain = fs.readFileSync(path.resolve(root, localFile));
+  writeRecordBytes(manifest, rec, editedPlain, apply);
+}
+
+function copyRecord(targetRecordName, sourceRecordName, apply) {
+  const manifest = loadManifest();
+  const source = getLiveRecord(manifest, sourceRecordName);
+  const target = getLiveRecord(manifest, targetRecordName);
+  const { plain: sourcePlain, rawBody: sourceRawBody } = decodePlainWithMode(manifest, source);
+  console.log(`Copy source ${source.name}: ${sourcePlain.length} bytes${sourceRawBody ? " (raw packed body)" : ""}`);
+  writeRecordBytes(manifest, target, sourcePlain, apply);
+}
+
 try {
   const { cmd, recordName, localFile, flag, gameDir } = parseArgs(process.argv.slice(2));
-  if (!cmd || !recordName || !localFile || !["check", "patch"].includes(cmd)) {
+  if (!cmd || !recordName || !localFile || !["check", "patch", "copy"].includes(cmd)) {
     usage();
     process.exit(cmd ? 1 : 0);
   }
   allPath = path.join(gameDir, "all.ppp");
-  patchRecord(recordName, localFile, cmd === "patch" && flag === "--apply");
+  if (cmd === "copy") {
+    copyRecord(recordName, localFile, flag === "--apply");
+  } else {
+    patchRecord(recordName, localFile, cmd === "patch" && flag === "--apply");
+  }
 } catch (err) {
   console.error(`ERROR: ${err.message}`);
   process.exit(1);

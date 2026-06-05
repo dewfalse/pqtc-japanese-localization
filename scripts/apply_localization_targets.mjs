@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const metadataPath = path.join(repoRoot, "metadata", "localized-records.txt");
+const copyMetadataPath = path.join(repoRoot, "metadata", "record-copies.txt");
 const patchScript = path.join(import.meta.dirname, "pqtc_record_patch.mjs");
 
 function usage() {
@@ -43,6 +44,19 @@ function loadRecordList() {
     .filter(Boolean);
 }
 
+function loadRecordCopies() {
+  if (!fs.existsSync(copyMetadataPath)) return [];
+  return fs.readFileSync(copyMetadataPath, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const [target, source] = line.split(/\t+/);
+      if (!target || !source) throw new Error(`Invalid record copy line: ${line}`);
+      return { target, source };
+    });
+}
+
 function localPathForRecord(root, recordName) {
   return path.join(root, ...recordName.split("\\"));
 }
@@ -50,6 +64,7 @@ function localPathForRecord(root, recordName) {
 function main() {
   const { gameDir, fromRoot } = parseArgs(process.argv.slice(2));
   const records = loadRecordList();
+  const copies = loadRecordCopies();
 
   for (const [index, recordName] of records.entries()) {
     const localFile = localPathForRecord(fromRoot, recordName);
@@ -61,6 +76,18 @@ function main() {
     const result = spawnSync(
       process.execPath,
       [patchScript, "patch", "--game-dir", gameDir, recordName, localFile, "--apply"],
+      { cwd: repoRoot, stdio: "inherit" }
+    );
+    if (result.status !== 0) {
+      process.exit(result.status ?? 1);
+    }
+  }
+
+  for (const [index, copy] of copies.entries()) {
+    console.log(`[copy ${index + 1}/${copies.length}] ${copy.target} <- ${copy.source}`);
+    const result = spawnSync(
+      process.execPath,
+      [patchScript, "copy", "--game-dir", gameDir, copy.target, copy.source, "--apply"],
       { cwd: repoRoot, stdio: "inherit" }
     );
     if (result.status !== 0) {

@@ -93,6 +93,7 @@ work/source/
 翻訳対象一覧:
 
 - [localized-records.txt](metadata/localized-records.txt)
+- [record-copies.txt](metadata/record-copies.txt)
 
 ### 4. 翻訳済みファイルをゲームへ適用する
 
