@@ -1,14 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const repoRoot = path.resolve(import.meta.dirname, "..");
+const root = path.resolve(import.meta.dirname, "..");
 const manifestPath = path.join(import.meta.dirname, "pqtc_text_manifest.json");
+let allPath = path.join(root, "all.ppp");
 
 function usage() {
   console.log([
     "Usage:",
-    '  node scripts/pqtc_record_patch.mjs patch --game-dir "<PQTC dir>" "<recordName>" "<localFile>" [--apply]',
-    '  node scripts/pqtc_record_patch.mjs check --game-dir "<PQTC dir>" "<recordName>" "<localFile>"',
+    '  node tools/pqtc_record_patch.mjs patch "<recordName>" "<localFile>" [--apply]',
+    '  node tools/pqtc_record_patch.mjs check "<recordName>" "<localFile>"',
+    '  node tools/pqtc_record_patch.mjs patch --game-dir "<PQTC dir>" "<recordName>" "<localFile>" [--apply]',
+    '  node tools/pqtc_record_patch.mjs check --game-dir "<PQTC dir>" "<recordName>" "<localFile>"',
   ].join("\n"));
 }
 
@@ -30,19 +33,14 @@ function parseArgs(argv) {
   const localFile = args.shift();
   const flag = args.shift();
 
-  if (!gameDir) throw new Error("Missing --game-dir");
-
   return {
     cmd,
     recordName,
     localFile,
     flag,
-    allPath: path.join(path.resolve(gameDir), "all.ppp"),
+    gameDir: gameDir ? path.resolve(gameDir) : root,
   };
 }
-
-const parsed = parseArgs(process.argv.slice(2));
-const allPath = parsed.allPath;
 
 function loadManifest() {
   return JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -103,8 +101,123 @@ function readHeader(manifest) {
       decoded,
       fileNum: readU32(decoded, 0),
       indexOffset: readU32(decoded, 4),
-      isCompress: decoded[12],
     };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function signedModulo125(lo, hi) {
+  let value = (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+  if ((hi & 0x80000000) !== 0) value -= 1n << 64n;
+  return Number(value % 125n);
+}
+
+function indexLocalByte(manifest, lo, hi) {
+  const window = manifest.indexLocalWindow;
+  const origin = manifest.indexLocalOrigin ?? 160;
+  return window[origin + signedModulo125(lo, hi)] & 0xff;
+}
+
+function xorIndexAcf(manifest, buf, recordIndex) {
+  const table = manifest.indexAcfTable;
+  let seed = ((manifest.indexSeedStart ?? 1) + recordIndex) & 0xff;
+  for (let p = 0; p < (manifest.indexRecordSize ?? 0x99); p += 4) {
+    buf[p] ^= table[seed];
+    seed = (seed + 4) & 0xff;
+  }
+}
+
+function decodeIndexRecord(manifest, raw, recordIndex) {
+  const recSize = manifest.indexRecordSize ?? 0x99;
+  const buf = Buffer.from(raw);
+  const lo = readU32(buf, 0);
+  const hi = readU32(buf, 4);
+  for (let i = 0; i < 0x20; i++) {
+    const off = 8 + i * 4;
+    writeU32(buf, off, (readU32(buf, off) - keyAt(manifest, 0x80 + i)) >>> 0);
+  }
+  const local = indexLocalByte(manifest, lo, hi);
+  for (let p = 0; p < recSize; p += 4) buf[p] ^= local;
+  writeU32(buf, 0, lo);
+  writeU32(buf, 4, hi);
+  xorIndexAcf(manifest, buf, recordIndex);
+  return buf;
+}
+
+function encodeIndexRecord(manifest, decoded, recordIndex) {
+  const recSize = manifest.indexRecordSize ?? 0x99;
+  const buf = Buffer.from(decoded);
+  xorIndexAcf(manifest, buf, recordIndex);
+  const lo = readU32(buf, 0);
+  const hi = readU32(buf, 4);
+  const local = indexLocalByte(manifest, lo, hi);
+  for (let p = 0; p < recSize; p += 4) buf[p] ^= local;
+  writeU32(buf, 0, lo);
+  writeU32(buf, 4, hi);
+  for (let i = 0; i < 0x20; i++) {
+    const off = 8 + i * 4;
+    writeU32(buf, off, (readU32(buf, off) + keyAt(manifest, 0x80 + i)) >>> 0);
+  }
+  return buf;
+}
+
+function indexRecordName(decoded) {
+  let end = decoded.indexOf(0, 8);
+  if (end < 0 || end > 0x88) end = 0x88;
+  return decoded.subarray(8, end).toString("utf8");
+}
+
+function fieldsFromIndexRecord(decoded) {
+  const size2 =
+    decoded[0x97] |
+    (decoded[0x91] << 8) |
+    (decoded[0x95] << 16) |
+    (decoded[0x93] << 24);
+  const size1 =
+    decoded[0x94] |
+    (decoded[0x96] << 8) |
+    (decoded[0x92] << 16) |
+    (decoded[0x98] << 24);
+  return {
+    dataOff: readU32(decoded, 0x8d),
+    size1: size1 >>> 0,
+    size2: size2 >>> 0,
+  };
+}
+
+function setIndexRecordFields(decoded, fields) {
+  writeU32(decoded, 0x8d, fields.dataOff >>> 0);
+  const size2 = fields.size2 >>> 0;
+  decoded[0x97] = size2 & 0xff;
+  decoded[0x91] = (size2 >>> 8) & 0xff;
+  decoded[0x95] = (size2 >>> 16) & 0xff;
+  decoded[0x93] = (size2 >>> 24) & 0xff;
+  const size1 = fields.size1 >>> 0;
+  decoded[0x94] = size1 & 0xff;
+  decoded[0x96] = (size1 >>> 8) & 0xff;
+  decoded[0x92] = (size1 >>> 16) & 0xff;
+  decoded[0x98] = (size1 >>> 24) & 0xff;
+}
+
+function readAllIndexRecords(manifest) {
+  const header = readHeader(manifest);
+  const recSize = manifest.indexRecordSize ?? 0x99;
+  const fd = fs.openSync(allPath, "r");
+  try {
+    const out = [];
+    for (let i = 0; i < header.fileNum; i++) {
+      const raw = Buffer.alloc(recSize);
+      fs.readSync(fd, raw, 0, recSize, header.indexOffset + i * recSize);
+      const decoded = decodeIndexRecord(manifest, raw, i);
+      out.push({
+        index: i,
+        name: indexRecordName(decoded),
+        decoded,
+        ...fieldsFromIndexRecord(decoded),
+      });
+    }
+    return out;
   } finally {
     fs.closeSync(fd);
   }
@@ -140,7 +253,6 @@ function snappyRawDecode(comp) {
   const { value: outLen } = readVarint(comp, state);
   const out = Buffer.alloc(outLen);
   let op = 0;
-
   while (state.pos < comp.length) {
     const tag = comp[state.pos++];
     const type = tag & 3;
@@ -163,7 +275,6 @@ function snappyRawDecode(comp) {
       op += len;
       continue;
     }
-
     let len;
     let off;
     if (type === 1) {
@@ -182,7 +293,6 @@ function snappyRawDecode(comp) {
     for (let i = 0; i < len; i++) out[op + i] = out[op - off + i];
     op += len;
   }
-
   if (op !== outLen) throw new Error(`Snappy length mismatch: ${op} != ${outLen}`);
   return out;
 }
@@ -190,7 +300,6 @@ function snappyRawDecode(comp) {
 function writeSnappyLiteral(data) {
   const lenMinusOne = data.length - 1;
   if (data.length <= 0) throw new Error("Cannot encode empty Snappy literal chunk");
-
   let literalHeader;
   if (lenMinusOne < 60) {
     literalHeader = Buffer.from([lenMinusOne << 2]);
@@ -203,7 +312,6 @@ function writeSnappyLiteral(data) {
     }
     literalHeader = Buffer.from([(59 + lenBytes.length) << 2, ...lenBytes]);
   }
-
   return Buffer.concat([writeVarint(data.length), literalHeader, data]);
 }
 
@@ -211,7 +319,6 @@ function parseSnappyCommands(comp) {
   const state = { pos: 0 };
   const header = readVarint(comp, state);
   const commands = [];
-
   while (state.pos < comp.length) {
     const start = state.pos;
     const tag = comp[state.pos++];
@@ -232,22 +339,22 @@ function parseSnappyCommands(comp) {
         }
         len += 1;
       }
-      commands.push({ start, tag, type: "literal", len, lenBytes, header: comp.subarray(start, state.pos) });
+      commands.push({ type: "literal", len, header: comp.subarray(start, state.pos) });
       state.pos += len;
     } else if (type === 1) {
-      const b0 = comp[state.pos++];
-      commands.push({ start, tag, type: "copy1", len: ((tag >>> 2) & 7) + 4, off: b0 | ((tag & 0xe0) << 3), encoded: comp.subarray(start, state.pos) });
+      const len = ((tag >>> 2) & 7) + 4;
+      state.pos += 1;
+      commands.push({ type: "copy", len, encoded: comp.subarray(start, state.pos) });
     } else if (type === 2) {
-      const off = comp[state.pos] | (comp[state.pos + 1] << 8);
+      const len = (tag >>> 2) + 1;
       state.pos += 2;
-      commands.push({ start, tag, type: "copy2", len: (tag >>> 2) + 1, off, encoded: comp.subarray(start, state.pos) });
+      commands.push({ type: "copy", len, encoded: comp.subarray(start, state.pos) });
     } else {
-      const off = comp[state.pos] | (comp[state.pos + 1] << 8) | (comp[state.pos + 2] << 16) | (comp[state.pos + 3] << 24);
+      const len = (tag >>> 2) + 1;
       state.pos += 4;
-      commands.push({ start, tag, type: "copy4", len: (tag >>> 2) + 1, off, encoded: comp.subarray(start, state.pos) });
+      commands.push({ type: "copy", len, encoded: comp.subarray(start, state.pos) });
     }
   }
-
   return { outLen: header.value, varint: comp.subarray(header.start, header.end), commands };
 }
 
@@ -256,197 +363,40 @@ function rebuildChunkWithSameCommands(originalComp, desiredPlainEncrypted) {
   if (parsed.outLen !== desiredPlainEncrypted.length) {
     throw new Error(`Chunk output length changed: ${desiredPlainEncrypted.length} != ${parsed.outLen}`);
   }
-
   const parts = [parsed.varint];
   let op = 0;
   for (const cmd of parsed.commands) {
     if (cmd.type === "literal") {
-      parts.push(cmd.header);
-      parts.push(desiredPlainEncrypted.subarray(op, op + cmd.len));
+      parts.push(cmd.header, desiredPlainEncrypted.subarray(op, op + cmd.len));
       op += cmd.len;
-      continue;
+    } else {
+      parts.push(cmd.encoded);
+      op += cmd.len;
     }
-
-    for (let i = 0; i < cmd.len; i++) {
-      if (desiredPlainEncrypted[op + i] !== desiredPlainEncrypted[op - cmd.off + i]) {
-        throw new Error(`Original Snappy copy constraint no longer holds at output offset ${op + i}`);
-      }
-    }
-    parts.push(cmd.encoded);
-    op += cmd.len;
   }
-
-  const rebuilt = Buffer.concat(parts);
-  if (rebuilt.length !== originalComp.length) {
-    throw new Error(`Compressed chunk length changed: ${rebuilt.length} != ${originalComp.length}`);
-  }
-  return rebuilt;
+  return Buffer.concat(parts);
 }
 
 function splitOuter(raw) {
   const chunks = [];
   let pos = 0;
   while (pos < raw.length) {
-    if (pos + 4 > raw.length) throw new Error("Truncated outer chunk length");
     const len = readU32(raw, pos);
     pos += 4;
-    if (len === 0 || len > raw.length - pos) {
-      throw new Error(`Invalid outer chunk length ${len} at ${pos - 4}`);
-    }
-    chunks.push({ len, comp: raw.subarray(pos, pos + len) });
+    chunks.push({ comp: raw.subarray(pos, pos + len) });
     pos += len;
   }
   return chunks;
 }
 
-function cryptTextBody(manifest, buf, size2, direction) {
+function cryptBody(manifest, buf, size2, direction) {
   const out = Buffer.from(buf);
   for (let p = 0; p + 4 <= out.length; p += 4) {
     const k = keyAt(manifest, size2 + (p >>> 2));
     const v = readU32(out, p);
-    writeU32(out, p, direction === "decrypt" ? (v - k) >>> 0 : (v + k) >>> 0);
+    writeU32(out, p, direction === "encrypt" ? (v + k) >>> 0 : (v - k) >>> 0);
   }
   return out;
-}
-
-function signedModulo125(lo, hi) {
-  let value = (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
-  if ((hi & 0x80000000) !== 0) value -= 1n << 64n;
-  return Number(value % 125n);
-}
-
-function indexLocalByte(manifest, lo, hi) {
-  const window = manifest.indexLocalWindow;
-  if (!window) throw new Error("Manifest does not contain indexLocalWindow");
-  const origin = manifest.indexLocalOrigin ?? 160;
-  return window[origin + signedModulo125(lo, hi)] & 0xff;
-}
-
-function xorIndexAcf(manifest, buf, recordIndex) {
-  const table = manifest.indexAcfTable;
-  if (!table) throw new Error("Manifest does not contain indexAcfTable");
-  let seed = ((manifest.indexSeedStart ?? 1) + recordIndex) & 0xff;
-  for (let p = 0; p < (manifest.indexRecordSize ?? 0x99); p += 4) {
-    buf[p] ^= table[seed];
-    seed = (seed + 4) & 0xff;
-  }
-}
-
-function decodeIndexRecord(manifest, raw, recordIndex) {
-  const recSize = manifest.indexRecordSize ?? 0x99;
-  if (raw.length !== recSize) throw new Error(`Index record size mismatch: ${raw.length}`);
-  const buf = Buffer.from(raw);
-  const lo = readU32(buf, 0);
-  const hi = readU32(buf, 4);
-
-  for (let i = 0; i < 0x20; i++) {
-    const off = 8 + i * 4;
-    writeU32(buf, off, (readU32(buf, off) - keyAt(manifest, 0x80 + i)) >>> 0);
-  }
-
-  const local = indexLocalByte(manifest, lo, hi);
-  for (let p = 0; p < recSize; p += 4) buf[p] ^= local;
-  writeU32(buf, 0, lo);
-  writeU32(buf, 4, hi);
-  xorIndexAcf(manifest, buf, recordIndex);
-  return buf;
-}
-
-function encodeIndexRecord(manifest, decoded, recordIndex) {
-  const recSize = manifest.indexRecordSize ?? 0x99;
-  const buf = Buffer.from(decoded);
-  xorIndexAcf(manifest, buf, recordIndex);
-
-  const lo = readU32(buf, 0);
-  const hi = readU32(buf, 4);
-  const local = indexLocalByte(manifest, lo, hi);
-  for (let p = 8; p < recSize; p += 4) buf[p] ^= local;
-
-  for (let i = 0; i < 0x20; i++) {
-    const off = 8 + i * 4;
-    writeU32(buf, off, (readU32(buf, off) + keyAt(manifest, 0x80 + i)) >>> 0);
-  }
-  writeU32(buf, 0, lo);
-  writeU32(buf, 4, hi);
-  return buf;
-}
-
-function indexRecordName(decoded) {
-  let end = decoded.indexOf(0, 8);
-  if (end < 0 || end > 0x88) end = 0x88;
-  return decoded.subarray(8, end).toString("utf8");
-}
-
-function readCurrentIndex(manifest) {
-  const header = readHeader(manifest);
-  const indexOff = header.indexOffset;
-  const recSize = manifest.indexRecordSize ?? 0x99;
-  const fileNum = manifest.fileNum ?? manifest.records.length;
-  if (typeof indexOff !== "number") throw new Error("Manifest does not contain indexOffset");
-
-  const fd = fs.openSync(allPath, "r");
-  try {
-    const byName = new Map();
-    const byIndex = [];
-    for (let i = 0; i < fileNum; i++) {
-      const raw = Buffer.alloc(recSize);
-      fs.readSync(fd, raw, 0, recSize, indexOff + i * recSize);
-      const decoded = decodeIndexRecord(manifest, raw, i);
-      const name = indexRecordName(decoded);
-      const entry = { index: i, raw, decoded, ...fieldsFromIndexRecord(decoded) };
-      byName.set(name, entry);
-      byIndex[i] = entry;
-    }
-    return { byName, byIndex };
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-function fieldsFromIndexRecord(decoded) {
-  const size2 =
-    (decoded[0x97]) |
-    (decoded[0x91] << 8) |
-    (decoded[0x95] << 16) |
-    (decoded[0x93] << 24);
-  const size1 =
-    (decoded[0x94]) |
-    (decoded[0x96] << 8) |
-    (decoded[0x92] << 16) |
-    (decoded[0x98] << 24);
-  return {
-    dataOff: readU32(decoded, 0x8d),
-    size1: size1 >>> 0,
-    size2: size2 >>> 0,
-  };
-}
-
-function setIndexRecordFields(decoded, fields) {
-  writeU32(decoded, 0x8d, fields.dataOff >>> 0);
-
-  const size2 = fields.size2 >>> 0;
-  decoded[0x97] = size2 & 0xff;
-  decoded[0x91] = (size2 >>> 8) & 0xff;
-  decoded[0x95] = (size2 >>> 16) & 0xff;
-  decoded[0x93] = (size2 >>> 24) & 0xff;
-
-  const size1 = fields.size1 >>> 0;
-  decoded[0x94] = size1 & 0xff;
-  decoded[0x96] = (size1 >>> 8) & 0xff;
-  decoded[0x92] = (size1 >>> 16) & 0xff;
-  decoded[0x98] = (size1 >>> 24) & 0xff;
-}
-
-function getRecord(manifest, name) {
-  const normalized = name.replaceAll("/", "\\");
-  const current = readCurrentIndex(manifest);
-  const indexRec = current.byName.get(normalized);
-  if (indexRec) return { name: normalized, ...indexRec };
-  const rec = manifest.recordsByName?.get(normalized);
-  if (!rec) throw new Error(`No manifest record for ${normalized}`);
-  const liveByIndex = current.byIndex[rec.index];
-  if (liveByIndex) return { name: normalized, ...liveByIndex };
-  return { ...rec, index: rec.index };
 }
 
 function readPackedRaw(rec) {
@@ -464,21 +414,16 @@ function decodePlain(manifest, rec) {
   const raw = readPackedRaw(rec);
   const chunks = splitOuter(raw);
   const encryptedBody = Buffer.concat(chunks.map((c) => snappyRawDecode(c.comp)));
-  if (encryptedBody.length !== rec.size2) {
-    throw new Error(`Outer decoded length ${encryptedBody.length} != record size2 ${rec.size2}`);
-  }
-  return cryptTextBody(manifest, encryptedBody, rec.size2, "decrypt");
+  return cryptBody(manifest, encryptedBody, rec.size2, "decrypt");
 }
 
-function rebuildPackedRaw(manifest, rec, editedPlain) {
+function rebuildPackedRawSameShape(manifest, rec, editedPlain) {
   if (editedPlain.length !== rec.size2) {
     throw new Error(`Edited byte length must stay ${rec.size2}, got ${editedPlain.length}`);
   }
-
   const originalRaw = readPackedRaw(rec);
   const originalChunks = splitOuter(originalRaw);
-  const encryptedBody = cryptTextBody(manifest, editedPlain, rec.size2, "encrypt");
-
+  const encryptedBody = cryptBody(manifest, editedPlain, rec.size2, "encrypt");
   let bodyPos = 0;
   const parts = [];
   for (const chunk of originalChunks) {
@@ -490,10 +435,6 @@ function rebuildPackedRaw(manifest, rec, editedPlain) {
     writeU32(header, 0, rebuiltComp.length);
     parts.push(header, rebuiltComp);
   }
-  if (bodyPos !== encryptedBody.length) {
-    throw new Error(`Chunk layout consumed ${bodyPos}, expected ${encryptedBody.length}`);
-  }
-
   const rebuilt = Buffer.concat(parts);
   if (rebuilt.length !== rec.size1) {
     throw new Error(`Packed record length changed: ${rebuilt.length} != ${rec.size1}`);
@@ -502,7 +443,7 @@ function rebuildPackedRaw(manifest, rec, editedPlain) {
 }
 
 function buildFreshPackedRaw(manifest, editedPlain) {
-  const encryptedBody = cryptTextBody(manifest, editedPlain, editedPlain.length, "encrypt");
+  const encryptedBody = cryptBody(manifest, editedPlain, editedPlain.length, "encrypt");
   const chunks = [];
   for (let pos = 0; pos < encryptedBody.length; pos += 0x2800) {
     const plainChunk = encryptedBody.subarray(pos, Math.min(encryptedBody.length, pos + 0x2800));
@@ -514,42 +455,24 @@ function buildFreshPackedRaw(manifest, editedPlain) {
   return Buffer.concat(chunks);
 }
 
-function normalizeLineEndingsLikeOriginal(originalPlain, editedPlain) {
-  const originalHasCrlf = originalPlain.includes(Buffer.from("\r\n"));
-  if (!originalHasCrlf) return editedPlain;
-
-  const editedText = editedPlain.toString("utf8");
-  const normalizedText = editedText.replace(/(?<!\r)\n/g, "\r\n");
-  return Buffer.from(normalizedText, "utf8");
-}
-
-function countDiff(a, b) {
-  const n = Math.min(a.length, b.length);
-  let count = Math.abs(a.length - b.length);
-  for (let i = 0; i < n; i++) if (a[i] !== b[i]) count++;
-  return count;
+function getLiveRecord(manifest, name) {
+  const records = readAllIndexRecords(manifest);
+  const rec = records.find((r) => r.name.toLowerCase() === name.toLowerCase());
+  if (!rec) throw new Error(`Record not found: ${name}`);
+  return rec;
 }
 
 function patchRecord(recordName, localFile, apply) {
   const manifest = loadManifest();
-  if (Array.isArray(manifest.records)) {
-    manifest.recordsByName = new Map(manifest.records.map((r) => [r.name, r]));
-  }
-
-  const rec = getRecord(manifest, recordName);
+  const rec = getLiveRecord(manifest, recordName);
+  const editedPlain = fs.readFileSync(path.resolve(root, localFile));
   const originalPlain = decodePlain(manifest, rec);
-  let editedPlain = fs.readFileSync(path.resolve(localFile));
-  const normalizedPlain = normalizeLineEndingsLikeOriginal(originalPlain, editedPlain);
-  if (!normalizedPlain.equals(editedPlain)) {
-    editedPlain = normalizedPlain;
-    console.log("Normalized LF line endings to CRLF for packing.");
-  }
   console.log(`${rec.name}: original=${originalPlain.length} edited=${editedPlain.length} delta=${editedPlain.length - originalPlain.length}`);
 
   let rebuilt;
   let mode = "in-place";
   try {
-    rebuilt = rebuildPackedRaw(manifest, rec, editedPlain);
+    rebuilt = rebuildPackedRawSameShape(manifest, rec, editedPlain);
   } catch (err) {
     mode = "append";
     rebuilt = buildFreshPackedRaw(manifest, editedPlain);
@@ -557,20 +480,9 @@ function patchRecord(recordName, localFile, apply) {
     console.log(`Insert mode will write a new packed record before the index: size1 ${rec.size1} -> ${rebuilt.length}, size2 ${rec.size2} -> ${editedPlain.length}`);
   }
 
-  const originalRaw = readPackedRaw(rec);
-  if (editedPlain.equals(originalPlain)) {
-    console.log("No plaintext changes detected.");
-  } else {
-    console.log(`Plaintext changed bytes: ${countDiff(originalPlain, editedPlain)}`);
-  }
-  console.log(`Packed bytes changed: ${countDiff(originalRaw, rebuilt)}`);
-
   const verifyEncrypted = Buffer.concat(splitOuter(rebuilt).map((c) => snappyRawDecode(c.comp)));
-  const verifySize2 = mode === "append" ? editedPlain.length : rec.size2;
-  const verifyPlain = cryptTextBody(manifest, verifyEncrypted, verifySize2, "decrypt");
-  if (!verifyPlain.equals(editedPlain)) {
-    throw new Error("Roundtrip verification failed");
-  }
+  const verifyPlain = cryptBody(manifest, verifyEncrypted, mode === "append" ? editedPlain.length : rec.size2, "decrypt");
+  if (!verifyPlain.equals(editedPlain)) throw new Error("Roundtrip verification failed");
   console.log("Roundtrip verification OK.");
 
   if (!apply) {
@@ -622,11 +534,12 @@ function patchRecord(recordName, localFile, apply) {
 }
 
 try {
-  const { cmd, recordName, localFile, flag } = parsed;
+  const { cmd, recordName, localFile, flag, gameDir } = parseArgs(process.argv.slice(2));
   if (!cmd || !recordName || !localFile || !["check", "patch"].includes(cmd)) {
     usage();
     process.exit(cmd ? 1 : 0);
   }
+  allPath = path.join(gameDir, "all.ppp");
   patchRecord(recordName, localFile, cmd === "patch" && flag === "--apply");
 } catch (err) {
   console.error(`ERROR: ${err.message}`);
