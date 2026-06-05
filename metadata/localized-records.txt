@@ -341,3 +341,5 @@ Texts\Warlord_ZHT.json
 Texts\WORK_EN.json
 Texts\WORK_ZHS.json
 Texts\WORK_ZHT.json
+Image\battle\Result\Img_VICTORY_ZHS.png
+Image\battle\Result\Img_DEFEAT_ZHS.png

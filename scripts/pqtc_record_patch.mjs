@@ -399,6 +399,22 @@ function cryptBody(manifest, buf, size2, direction) {
   return out;
 }
 
+function isPng(buf) {
+  return buf.length >= 8
+    && buf[0] === 0x89
+    && buf[1] === 0x50
+    && buf[2] === 0x4e
+    && buf[3] === 0x47
+    && buf[4] === 0x0d
+    && buf[5] === 0x0a
+    && buf[6] === 0x1a
+    && buf[7] === 0x0a;
+}
+
+function usesRawPackedBody(recordName, expandedBody) {
+  return /\.png$/i.test(recordName) && isPng(expandedBody);
+}
+
 function readPackedRaw(rec) {
   const fd = fs.openSync(allPath, "r");
   try {
@@ -410,20 +426,23 @@ function readPackedRaw(rec) {
   }
 }
 
-function decodePlain(manifest, rec) {
+function decodePlainWithMode(manifest, rec) {
   const raw = readPackedRaw(rec);
   const chunks = splitOuter(raw);
   const encryptedBody = Buffer.concat(chunks.map((c) => snappyRawDecode(c.comp)));
-  return cryptBody(manifest, encryptedBody, rec.size2, "decrypt");
+  if (usesRawPackedBody(rec.name, encryptedBody)) {
+    return { plain: encryptedBody, rawBody: true };
+  }
+  return { plain: cryptBody(manifest, encryptedBody, rec.size2, "decrypt"), rawBody: false };
 }
 
-function rebuildPackedRawSameShape(manifest, rec, editedPlain) {
+function rebuildPackedRawSameShape(manifest, rec, editedPlain, rawBody) {
   if (editedPlain.length !== rec.size2) {
     throw new Error(`Edited byte length must stay ${rec.size2}, got ${editedPlain.length}`);
   }
   const originalRaw = readPackedRaw(rec);
   const originalChunks = splitOuter(originalRaw);
-  const encryptedBody = cryptBody(manifest, editedPlain, rec.size2, "encrypt");
+  const encryptedBody = rawBody ? editedPlain : cryptBody(manifest, editedPlain, rec.size2, "encrypt");
   let bodyPos = 0;
   const parts = [];
   for (const chunk of originalChunks) {
@@ -442,8 +461,8 @@ function rebuildPackedRawSameShape(manifest, rec, editedPlain) {
   return rebuilt;
 }
 
-function buildFreshPackedRaw(manifest, editedPlain) {
-  const encryptedBody = cryptBody(manifest, editedPlain, editedPlain.length, "encrypt");
+function buildFreshPackedRaw(manifest, editedPlain, rawBody) {
+  const encryptedBody = rawBody ? editedPlain : cryptBody(manifest, editedPlain, editedPlain.length, "encrypt");
   const chunks = [];
   for (let pos = 0; pos < encryptedBody.length; pos += 0x2800) {
     const plainChunk = encryptedBody.subarray(pos, Math.min(encryptedBody.length, pos + 0x2800));
@@ -466,22 +485,23 @@ function patchRecord(recordName, localFile, apply) {
   const manifest = loadManifest();
   const rec = getLiveRecord(manifest, recordName);
   const editedPlain = fs.readFileSync(path.resolve(root, localFile));
-  const originalPlain = decodePlain(manifest, rec);
+  const { plain: originalPlain, rawBody } = decodePlainWithMode(manifest, rec);
   console.log(`${rec.name}: original=${originalPlain.length} edited=${editedPlain.length} delta=${editedPlain.length - originalPlain.length}`);
+  if (rawBody) console.log("Raw packed body mode detected.");
 
   let rebuilt;
   let mode = "in-place";
   try {
-    rebuilt = rebuildPackedRawSameShape(manifest, rec, editedPlain);
+    rebuilt = rebuildPackedRawSameShape(manifest, rec, editedPlain, rawBody);
   } catch (err) {
     mode = "append";
-    rebuilt = buildFreshPackedRaw(manifest, editedPlain);
+    rebuilt = buildFreshPackedRaw(manifest, editedPlain, rawBody);
     console.log(`In-place rebuild unavailable: ${err.message}`);
     console.log(`Insert mode will write a new packed record before the index: size1 ${rec.size1} -> ${rebuilt.length}, size2 ${rec.size2} -> ${editedPlain.length}`);
   }
 
   const verifyEncrypted = Buffer.concat(splitOuter(rebuilt).map((c) => snappyRawDecode(c.comp)));
-  const verifyPlain = cryptBody(manifest, verifyEncrypted, mode === "append" ? editedPlain.length : rec.size2, "decrypt");
+  const verifyPlain = rawBody ? verifyEncrypted : cryptBody(manifest, verifyEncrypted, mode === "append" ? editedPlain.length : rec.size2, "decrypt");
   if (!verifyPlain.equals(editedPlain)) throw new Error("Roundtrip verification failed");
   console.log("Roundtrip verification OK.");
 
